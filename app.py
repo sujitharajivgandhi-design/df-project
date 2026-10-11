@@ -869,4 +869,8 @@ if st.button("📄 Generate PDF Report", key="generate_pdf_report"):
         st.error(f"PDF generation failed: {error}")
 
 
+<<<<<<< HEAD
 st.caption("AI-Based Browser & Email Forensics Engine")
+=======
+st.caption("AI-Based Browser & Email Forensics Engine")
+>>>>>>> c00414c (Fix Gmail OAuth PKCE)
