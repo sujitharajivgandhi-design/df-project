@@ -1,239 +1,275 @@
 import os
 import sys
+
 import joblib
+import numpy as np
 import pandas as pd
+from scipy.sparse import hstack
 from urllib.parse import urlparse
 
-# ============================================================
-# AI-BASED BROWSER PHISHING ANALYSIS
-# ============================================================
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(BASE_DIR)
-
-MODEL_PATH = os.path.join(PROJECT_DIR, "models", "phishing_model.pkl")
-SCALER_PATH = os.path.join(PROJECT_DIR, "models", "scaler.pkl")
-HISTORY_PATH = os.path.join(BASE_DIR, "history.csv")
-OUTPUT_PATH = os.path.join(BASE_DIR, "suspicious_urls_v3.csv")
-
-# These names and their order must match the model's training pipeline.
-FEATURES = [
-    "url_length",
-    "valid_url",
-    "at_symbol",
-    "sensitive_words_count",
-    "path_length",
-    "isHttps",
-    "nb_dots",
-    "nb_hyphens",
-    "nb_and",
-    "nb_or",
-    "nb_www",
-    "nb_com",
-    "nb_underscore",
-]
-
-SUSPICIOUS_WORDS = [
-    "login", "verify", "update", "secure", "account",
-    "password", "signin", "banking", "confirm", "wallet",
-    "payment", "authenticate", "suspend",
-]
+print("======================================")
+print("   AI PHISHING URL ANALYSIS - V3")
+print("======================================")
 
 
-def extract_features(url):
-    """Extract URL features. This must match the training procedure."""
-    url = str(url).strip()
-    lower_url = url.lower()
-    parsed = urlparse(url if "://" in url else "//" + url)
-    hostname = parsed.hostname or ""
+# ==========================================================
+# PATHS
+# ==========================================================
 
-    return {
-        "url_length": len(url),
-        "valid_url": int(bool(hostname and "." in hostname)),
-        "at_symbol": int("@" in url),
-        "sensitive_words_count": sum(
-            lower_url.count(word) for word in SUSPICIOUS_WORDS
-        ),
-        "path_length": len(parsed.path),
-        "isHttps": int(lower_url.startswith("https://")),
-        "nb_dots": lower_url.count("."),
-        "nb_hyphens": lower_url.count("-"),
-        "nb_and": lower_url.count("and"),
-        "nb_or": lower_url.count("or"),
-        "nb_www": lower_url.count("www"),
-        "nb_com": lower_url.count(".com"),
-        "nb_underscore": lower_url.count("_"),
-    }
+BASE_DIR = os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))
+)
 
+MODEL_PATH = os.path.join(
+    BASE_DIR, "models", "phishing_url_model_v3.joblib"
+)
 
-def identify_phishing_class(model):
-    """Identify the phishing label using common explicit class names."""
-    if not hasattr(model, "classes_"):
-        raise ValueError("The loaded model does not expose classes_.")
+VECTORIZER_PATH = os.path.join(
+    BASE_DIR, "models", "phishing_url_vectorizer_v3.joblib"
+)
 
-    classes = list(model.classes_)
-    supported_labels = {"1", "phishing", "malicious", "unsafe"}
+HISTORY_PATH = os.path.join(
+    BASE_DIR, "history.csv"
+)
 
-    for label in classes:
-        if str(label).strip().lower() in supported_labels:
-            return label
-
-    raise ValueError(
-        f"Cannot identify the phishing class from model classes {classes}. "
-        "Check the target labels used during training."
-    )
+OUTPUT_PATH = os.path.join(
+    BASE_DIR, "suspicious_urls_v3.csv"
+)
 
 
-def is_web_url(value):
-    """Accept only URLs with a valid HTTP or HTTPS scheme and hostname."""
+# ==========================================================
+# URL STRUCTURAL FEATURES
+# Must match the feature format used during model training.
+# ==========================================================
+
+def extract_url_features(url):
+    url = str(url)
+
     try:
-        parsed = urlparse(str(value).strip())
-        return (
-            parsed.scheme.lower() in {"http", "https"}
-            and bool(parsed.hostname)
-        )
-    except (TypeError, ValueError):
-        return False
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        path = parsed.path
+        query = parsed.query
+
+        return [
+            len(url),
+            len(domain),
+            len(path),
+            len(query),
+            domain.count("."),
+            domain.count("-"),
+            domain.count("_"),
+            url.count("/"),
+            url.count("?"),
+            url.count("="),
+            url.count("&"),
+            url.count("%"),
+            sum(c.isdigit() for c in url),
+            sum(c.isalpha() for c in url),
+            int(url.startswith("https://")),
+            int(url.startswith("http://")),
+            int("@" in url),
+            int("://" in url),
+            len(set(domain)),
+        ]
+
+    except Exception:
+        return [0] * 19
 
 
-def main():
-    print("=" * 60)
-    print("AI-BASED BROWSER PHISHING ANALYSIS")
-    print("=" * 60)
+# ==========================================================
+# CHECK REQUIRED FILES
+# ==========================================================
 
-    for path in (MODEL_PATH, SCALER_PATH, HISTORY_PATH):
-        if not os.path.isfile(path):
-            raise FileNotFoundError(f"Required file not found: {path}")
+for file_path, description in [
+    (MODEL_PATH, "V3 AI model"),
+    (VECTORIZER_PATH, "V3 vectorizer"),
+    (HISTORY_PATH, "Browser history CSV"),
+]:
+    if not os.path.exists(file_path):
+        print(f"\nERROR: {description} not found:")
+        print(file_path)
+        raise SystemExit(1)
 
-    print("\nLoading model and scaler...")
-    model = joblib.load(MODEL_PATH)
-    scaler = joblib.load(SCALER_PATH)
 
-    model_feature_count = getattr(model, "n_features_in_", None)
-    scaler_feature_count = getattr(scaler, "n_features_in_", None)
+# ==========================================================
+# LOAD MODEL AND HISTORY
+# ==========================================================
 
-    if model_feature_count is not None and model_feature_count != len(FEATURES):
-        raise ValueError(
-            f"Model expects {model_feature_count} features; "
-            f"this script supplies {len(FEATURES)}."
-        )
+print("\nLoading V3 AI phishing model...")
 
-    if scaler_feature_count is not None and scaler_feature_count != len(FEATURES):
-        raise ValueError(
-            f"Scaler expects {scaler_feature_count} features; "
-            f"this script supplies {len(FEATURES)}."
-        )
+model = joblib.load(MODEL_PATH)
+vectorizer = joblib.load(VECTORIZER_PATH)
 
-    if not callable(getattr(scaler, "transform", None)):
-        raise ValueError("The loaded scaler does not support transform().")
+print("V3 AI model loaded successfully.")
 
-    if not callable(getattr(model, "predict", None)):
-        raise ValueError("The loaded model does not support predict().")
+print("\nLoading browser history...")
 
-    if not callable(getattr(model, "predict_proba", None)):
-        raise ValueError(
-            "The loaded model does not support predict_proba()."
-        )
+df = pd.read_csv(HISTORY_PATH)
 
-    phishing_class = identify_phishing_class(model)
-    classes = list(model.classes_)
-    phishing_index = classes.index(phishing_class)
+if "URL" not in df.columns:
+    print("ERROR: URL column not found in history.csv")
+    print("Available columns:", df.columns.tolist())
+    raise SystemExit(1)
 
-    print(f"Model classes: {classes}")
-    print(f"Phishing class assumed from labels: {phishing_class}")
+df = df.dropna(subset=["URL"]).copy()
+df["URL"] = df["URL"].astype(str).str.strip()
+df = df[df["URL"] != ""]
 
-    print("\nReading browser history...")
-    history = pd.read_csv(HISTORY_PATH)
+unique_urls = df["URL"].drop_duplicates().tolist()
 
-    if "URL" not in history.columns:
-        raise ValueError(
-            "history.csv must contain a 'URL' column. "
-            f"Found columns: {history.columns.tolist()}"
-        )
+print(f"\nTotal unique URLs to analyze: {len(unique_urls)}")
 
-    original_count = len(history)
-    history = history.dropna(subset=["URL"]).copy()
-    history["URL"] = history["URL"].astype(str).str.strip()
-    history = history[history["URL"].ne("")].copy()
-    history = history[history["URL"].apply(is_web_url)].copy()
+if not unique_urls:
+    empty_df = pd.DataFrame(
+        columns=[
+            "Browser",
+            "URL",
+            "Status",
+            "Confidence",
+            "Visit Time",
+        ]
+    )
+    empty_df.to_csv(OUTPUT_PATH, index=False)
+    print("No URLs available for analysis.")
+    print("Empty results saved to:", OUTPUT_PATH)
+    raise SystemExit(0)
 
-    if history.empty:
-        raise ValueError("No valid HTTP/HTTPS URLs found in history.csv.")
 
-    unique_urls = history["URL"].drop_duplicates().tolist()
+# ==========================================================
+# FEATURE EXTRACTION
+# ==========================================================
 
-    print(f"History rows loaded: {original_count}")
-    print(f"Valid HTTP/HTTPS history rows: {len(history)}")
-    print(f"Unique URLs to analyze: {len(unique_urls)}")
+print("\nCreating TF-IDF features...")
 
-    print("\nExtracting features...")
-    feature_df = pd.DataFrame(
-        [extract_features(url) for url in unique_urls],
-        columns=FEATURES,
+url_tfidf = vectorizer.transform(unique_urls)
+
+print("Creating structural URL features...")
+
+url_structural = np.asarray(
+    [extract_url_features(url) for url in unique_urls],
+    dtype=float,
+)
+
+print("Combining AI features...")
+
+# The V3 model must have been trained with TF-IDF + these
+# same 19 structural features. Otherwise, use its matching
+# training pipeline rather than combining incompatible inputs.
+url_features = hstack(
+    [url_tfidf, url_structural],
+    format="csr",
+)
+
+
+# ==========================================================
+# PREDICTION
+# ==========================================================
+
+print("\nRunning AI predictions...")
+
+predictions = model.predict(url_features)
+probabilities = model.predict_proba(url_features)
+
+classes = list(model.classes_)
+
+# Treat class 1 as phishing only if that label exists.
+phishing_label = 1 if 1 in classes else None
+
+if phishing_label is None:
+    print(
+        "WARNING: Model has no class labelled 1. "
+        "Check the model's training labels."
     )
 
-    if feature_df.isnull().any().any():
-        raise ValueError("Feature extraction produced missing values.")
+phishing_index = (
+    classes.index(phishing_label)
+    if phishing_label in classes
+    else None
+)
 
-    print("Scaling features...")
-    scaled_features = scaler.transform(feature_df)
+results = []
 
-    print("Predicting URL classifications...")
-    predictions = model.predict(scaled_features)
-    probabilities = model.predict_proba(scaled_features)
+for url, prediction, probability in zip(
+    unique_urls,
+    predictions,
+    probabilities,
+):
+    is_phishing = (
+        phishing_index is not None
+        and prediction == phishing_label
+    )
 
-    if len(predictions) != len(unique_urls):
-        raise ValueError("Unexpected number of model predictions.")
+    status = "PHISHING" if is_phishing else "BENIGN"
 
-    if probabilities.shape[1] != len(classes):
-        raise ValueError("Probability columns do not match model classes.")
+    confidence_index = classes.index(prediction)
+    confidence = float(probability[confidence_index]) * 100
 
-    results = []
+    matching_rows = df[df["URL"] == url]
 
-    for url, prediction, probs in zip(unique_urls, predictions, probabilities):
-        matching = history[history["URL"] == url]
+    browsers = (
+        matching_rows["Browser"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+        if "Browser" in matching_rows.columns
+        else []
+    )
 
-        browser_names = (
-            matching["Browser"].dropna().astype(str).unique().tolist()
-            if "Browser" in matching.columns else []
-        )
-        visit_times = (
-            matching["Visit Time"].dropna().astype(str).tolist()
-            if "Visit Time" in matching.columns else []
-        )
+    visit_times = (
+        matching_rows["Visit Time"]
+        .dropna()
+        .astype(str)
+        .tolist()
+        if "Visit Time" in matching_rows.columns
+        else []
+    )
 
-        predicted_index = classes.index(prediction)
-        status = "PHISHING" if prediction == phishing_class else "BENIGN"
-
-        results.append({
-            "Browser": ", ".join(browser_names) if browser_names else "Unknown",
+    results.append(
+        {
+            "Browser": ", ".join(browsers) or "Unknown",
             "URL": url,
             "Status": status,
-            "Confidence": round(float(probs[predicted_index]) * 100, 2),
-            "Phishing Probability": round(float(probs[phishing_index]) * 100, 2),
+            "Confidence": round(confidence, 2),
             "Visit Time": visit_times[0] if visit_times else "",
-        })
-
-    result_df = pd.DataFrame(results)
-    result_df.to_csv(OUTPUT_PATH, index=False, encoding="utf-8")
-
-    phishing_count = int((result_df["Status"] == "PHISHING").sum())
-    benign_count = int((result_df["Status"] == "BENIGN").sum())
-
-    print("\n" + "=" * 60)
-    print("BROWSER AI ANALYSIS COMPLETED")
-    print("=" * 60)
-    print(f"URLs analyzed: {len(result_df)}")
-    print(f"Potential phishing URLs: {phishing_count}")
-    print(f"URLs classified as benign: {benign_count}")
-    print(f"Results saved to: {OUTPUT_PATH}")
-    print("Note: Predictions are estimates, not proof that a URL is malicious or safe.")
+        }
+    )
 
 
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as error:
-        print("\nAI PHISHING ANALYSIS FAILED")
-        print(f"{type(error).__name__}: {error}")
-        sys.exit(1)
+# ==========================================================
+# SAVE RESULTS
+# ==========================================================
+
+result_df = pd.DataFrame(results)
+result_df.to_csv(OUTPUT_PATH, index=False)
+
+total = len(result_df)
+phishing = int((result_df["Status"] == "PHISHING").sum())
+benign = int((result_df["Status"] == "BENIGN").sum())
+
+if phishing == 0:
+    risk_level = "LOW"
+elif phishing <= 3:
+    risk_level = "MEDIUM"
+else:
+    risk_level = "HIGH"
+
+print("\n======================================")
+print("V3 ANALYSIS SUMMARY")
+print("======================================")
+print(f"Total URLs analyzed: {total}")
+print(f"Phishing URLs: {phishing}")
+print(f"Benign URLs: {benign}")
+print(f"Overall Browser Risk Level: {risk_level}")
+
+print("\nResults preview:")
+print(result_df.head(20).to_string(index=False))
+
+print("\nResults saved to:")
+print(OUTPUT_PATH)
+
+print("\nBROWSER ANALYSIS COMPLETED")
+print("======================================")
+
