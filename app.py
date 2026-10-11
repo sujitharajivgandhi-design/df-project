@@ -1,9 +1,8 @@
-
-import os
-import sys
 import base64
-import subprocess
+import importlib.util
 import inspect
+import subprocess
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
@@ -17,7 +16,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 # ==========================================================
-# STREAMLIT CONFIGURATION
+# APP CONFIGURATION
 # ==========================================================
 
 st.set_page_config(
@@ -33,9 +32,11 @@ if not (EMAIL_DIR / "main.py").exists():
     EMAIL_DIR = ROOT_DIR
 
 BROWSER_SCRIPT = ROOT_DIR / "browser" / "suspicious_urls.py"
+
 BROWSER_CSV_CANDIDATES = [
     ROOT_DIR / "suspicious_urls_v3.csv",
     ROOT_DIR / "browser" / "suspicious_urls_v3.csv",
+    ROOT_DIR / "dataset" / "suspicious_urls_v3.csv",
     EMAIL_DIR / "suspicious_urls_v3.csv",
 ]
 
@@ -71,23 +72,25 @@ for key, value in DEFAULTS.items():
 def get_oauth_settings():
     try:
         auth = st.secrets["auth"]
-        client_id = auth["client_id"]
-        client_secret = auth["client_secret"]
-        redirect_uri = auth["redirect_uri"]
 
-        return client_id, client_secret, redirect_uri
+        return (
+            auth["client_id"],
+            auth["client_secret"],
+            auth["redirect_uri"],
+        )
 
     except Exception:
         st.error(
-            "Google OAuth settings are missing. Add client_id, "
-            "client_secret, and redirect_uri under [auth] in "
-            "Streamlit Cloud Secrets."
+            "Google OAuth settings are missing. Check the [auth] "
+            "section in Streamlit Cloud Secrets. It must contain "
+            "client_id, client_secret, and redirect_uri."
         )
         return None
 
 
 def create_oauth_flow(state=None):
     settings = get_oauth_settings()
+
     if not settings:
         return None
 
@@ -108,7 +111,9 @@ def create_oauth_flow(state=None):
         scopes=SCOPES,
         state=state,
     )
+
     flow.redirect_uri = redirect_uri
+
     return flow
 
 
@@ -128,6 +133,7 @@ def get_gmail_service():
             credentials.refresh(
                 google.auth.transport.requests.Request()
             )
+
             st.session_state.gmail_token = {
                 "token": credentials.token,
                 "refresh_token": credentials.refresh_token,
@@ -139,6 +145,7 @@ def get_gmail_service():
 
         if not credentials.valid:
             st.session_state.gmail_token = None
+            st.session_state.gmail_service = None
             return None
 
         service = build(
@@ -147,24 +154,36 @@ def get_gmail_service():
             credentials=credentials,
             cache_discovery=False,
         )
+
         st.session_state.gmail_service = service
+
         return service
 
-    except Exception:
+    except Exception as error:
         st.session_state.gmail_token = None
         st.session_state.gmail_service = None
+
+        st.session_state.oauth_error = (
+            "Gmail credentials could not be loaded. "
+            "Please connect Gmail again. "
+            f"Details: {error}"
+        )
+
         return None
 
 
 def handle_oauth_callback():
-    """Exchange Google's returned authorization code for credentials."""
+    """Handle Google's redirect after the user approves Gmail access."""
+
     params = st.query_params
+
     code = params.get("code")
     returned_state = params.get("state")
     oauth_error = params.get("error")
 
     if oauth_error:
         st.session_state.oauth_error = str(oauth_error)
+        st.session_state.oauth_url = None
         st.query_params.clear()
         return
 
@@ -175,27 +194,36 @@ def handle_oauth_callback():
 
     if not expected_state or returned_state != expected_state:
         st.session_state.oauth_error = (
-            "OAuth state validation failed. Please try connecting again."
+            "Google returned to the app, but the sign-in state "
+            "could not be verified. Please try connecting again."
         )
+
+        st.session_state.oauth_url = None
         st.query_params.clear()
         return
 
+    settings = get_oauth_settings()
+
+    if not settings:
+        return
+
+    _, _, redirect_uri = settings
+
     try:
         flow = create_oauth_flow(state=expected_state)
+
         if flow is None:
             return
 
-        settings = get_oauth_settings()
-        _, _, redirect_uri = settings
-
-        # Construct the callback URL using the registered redirect URI
-        # and Google's returned code/state parameters.
         callback_url = redirect_uri + "?" + urlencode({
             "code": code,
             "state": returned_state,
         })
 
-        flow.fetch_token(authorization_response=callback_url)
+        flow.fetch_token(
+            authorization_response=callback_url
+        )
+
         credentials = flow.credentials
 
         st.session_state.gmail_token = {
@@ -210,15 +238,20 @@ def handle_oauth_callback():
         st.session_state.gmail_service = None
         st.session_state.gmail_messages = []
         st.session_state.oauth_state = None
+        st.session_state.oauth_url = None
         st.session_state.oauth_error = None
+
         st.query_params.clear()
         st.rerun()
 
     except Exception as error:
         st.session_state.oauth_error = (
-            "Google login failed. Check the redirect URI in Google "
-            "Cloud and Streamlit Secrets. Details: " + str(error)
+            "Google login failed. Check that the redirect URI "
+            "in Streamlit Secrets matches the URI in Google Cloud "
+            "exactly. Details: " + str(error)
         )
+
+        st.session_state.oauth_url = None
         st.query_params.clear()
 
 
@@ -229,34 +262,49 @@ def gmail_login_ui():
         st.error(st.session_state.oauth_error)
 
     service = get_gmail_service()
+
     if service:
         st.success("Gmail connected successfully.")
-        if st.button("Disconnect Gmail"):
+
+        if st.button(
+            "Disconnect Gmail",
+            key="disconnect_gmail",
+        ):
             st.session_state.gmail_token = None
             st.session_state.gmail_service = None
             st.session_state.gmail_messages = []
+            st.session_state.oauth_state = None
+            st.session_state.oauth_url = None
             st.rerun()
+
         return service
 
     st.info("Connect your Google account to search Gmail.")
 
-    if st.button("Connect to Gmail"):
+    if st.button(
+        "Connect to Gmail",
+        key="connect_gmail",
+    ):
         flow = create_oauth_flow()
-        if flow is None:
-            return None
 
-        try:
-            authorization_url, state = flow.authorization_url(
-                access_type="offline",
-                include_granted_scopes="true",
-                prompt="consent",
-            )
-            st.session_state.oauth_state = state
-            st.session_state.oauth_url = authorization_url
-            st.rerun()
+        if flow is not None:
+            try:
+                authorization_url, state = (
+                    flow.authorization_url(
+                        access_type="offline",
+                        include_granted_scopes="true",
+                        prompt="consent",
+                    )
+                )
 
-        except Exception as error:
-            st.error(f"Could not start Google login: {error}")
+                st.session_state.oauth_state = state
+                st.session_state.oauth_url = authorization_url
+                st.session_state.oauth_error = None
+
+            except Exception as error:
+                st.session_state.oauth_error = (
+                    f"Could not start Google login: {error}"
+                )
 
     if st.session_state.oauth_url:
         st.link_button(
@@ -264,6 +312,7 @@ def gmail_login_ui():
             st.session_state.oauth_url,
             type="primary",
         )
+
         st.caption(
             "After approving access, Google returns you to this app."
         )
@@ -277,10 +326,16 @@ def gmail_login_ui():
 
 def search_gmail(service, sender, start_date, end_date):
     start_text = start_date.strftime("%Y/%m/%d")
+
+    # Gmail's before: date is exclusive.
     next_day = end_date + timedelta(days=1)
     end_text = next_day.strftime("%Y/%m/%d")
 
-    query = f"from:{sender} after:{start_text} before:{end_text}"
+    query = (
+        f"from:{sender} "
+        f"after:{start_text} "
+        f"before:{end_text}"
+    )
 
     results = service.users().messages().list(
         userId="me",
@@ -291,26 +346,38 @@ def search_gmail(service, sender, start_date, end_date):
     return results.get("messages", [])
 
 
+def _header_value(headers, name):
+    for header in headers or []:
+        if header.get("name", "").lower() == name.lower():
+            return header.get("value", "")
+
+    return ""
+
+
 def get_email_details(service, message_id):
-    response = service.users().messages().get(
+    """Retrieve email details for the selection list."""
+
+    message = service.users().messages().get(
         userId="me",
         id=message_id,
-        format="metadata",
-        metadataHeaders=["From", "To", "Subject", "Date"],
+        format="full",
     ).execute()
 
-    headers = response.get("payload", {}).get("headers", [])
-    details = {"From": "", "To": "", "Subject": "", "Date": ""}
+    payload = message.get("payload", {})
+    headers = payload.get("headers", [])
 
-    for header in headers:
-        name = header.get("name", "")
-        if name in details:
-            details[name] = header.get("value", "")
-
-    return details
+    return {
+        "From": _header_value(headers, "From") or "Unknown sender",
+        "To": _header_value(headers, "To") or "Unknown recipient",
+        "Subject": _header_value(headers, "Subject") or "",
+        "Date": _header_value(headers, "Date") or "Unknown date",
+        "Snippet": message.get("snippet", ""),
+    }
 
 
 def save_selected_email(service, message_id):
+    """Download the selected email and save it as an EML file."""
+
     response = service.users().messages().get(
         userId="me",
         id=message_id,
@@ -318,11 +385,16 @@ def save_selected_email(service, message_id):
     ).execute()
 
     raw_data = response.get("raw", "")
+
     email_bytes = base64.urlsafe_b64decode(
         raw_data + "=" * (-len(raw_data) % 4)
     )
 
-    EMAIL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    EMAIL_FILE.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     EMAIL_FILE.write_bytes(email_bytes)
 
 
@@ -334,13 +406,27 @@ def find_browser_csv():
     for path in BROWSER_CSV_CANDIDATES:
         if path.exists():
             return path
+
+    try:
+        matches = list(
+            ROOT_DIR.glob("**/suspicious_urls_v3.csv")
+        )
+
+        if matches:
+            return matches[0]
+
+    except Exception:
+        pass
+
     return None
 
 
 def run_browser_analysis():
     if not BROWSER_SCRIPT.exists():
-        st.error(f"Browser analysis script not found: {BROWSER_SCRIPT}")
-        return
+        st.error(
+            f"Browser analysis script not found: {BROWSER_SCRIPT}"
+        )
+        return False
 
     try:
         with st.spinner("Running browser analysis..."):
@@ -353,72 +439,157 @@ def run_browser_analysis():
             )
 
         if result.returncode != 0:
-            st.error("Browser analysis failed.")
-            st.code(result.stderr or result.stdout)
-            return
+            st.error(
+                "Browser analysis failed. The browser script "
+                "must be fixed before it can generate results."
+            )
+
+            st.code(
+                (
+                    result.stderr
+                    or result.stdout
+                    or "No error output was produced."
+                )[-12000:]
+            )
+
+            return False
 
         st.success("Browser analysis completed.")
+
         if result.stdout:
             with st.expander("Browser analysis output"):
                 st.text(result.stdout)
 
+        if find_browser_csv() is None:
+            st.warning(
+                "The analysis finished, but suspicious_urls_v3.csv "
+                "was not found. Check where the browser script "
+                "saves its output."
+            )
+            return False
+
+        return True
+
     except subprocess.TimeoutExpired:
-        st.error("Browser analysis took too long and was stopped.")
+        st.error(
+            "Browser analysis took too long and was stopped."
+        )
+
     except Exception as error:
         st.error(f"Browser analysis failed: {error}")
 
+    return False
 
-def show_browser_results():
+
+def load_browser_results():
     csv_path = find_browser_csv()
 
     if csv_path is None:
-        st.warning("Browser results CSV not found. Run the analysis first.")
-        return 0, 0, 0, "UNKNOWN"
+        return None
 
     try:
-        df = pd.read_csv(csv_path)
+        return pd.read_csv(csv_path)
+
     except Exception as error:
-        st.error(f"Could not read browser results: {error}")
+        st.error(
+            f"Could not read browser results at {csv_path}: {error}"
+        )
+        return None
+
+
+def browser_metrics(df):
+    if df is None:
         return 0, 0, 0, "UNKNOWN"
 
     if "Status" not in df.columns:
-        st.error("The results CSV does not contain a 'Status' column.")
-        st.dataframe(df, use_container_width=True)
         return len(df), 0, 0, "UNKNOWN"
 
-    status_values = df["Status"].astype(str).str.upper()
-    total = len(df)
-    phishing = int((status_values == "PHISHING").sum())
-    benign = int((status_values == "BENIGN").sum())
+    statuses = (
+        df["Status"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
 
-    if phishing == 0:
-        risk_level = "LOW"
-    elif phishing <= 3:
-        risk_level = "MEDIUM"
-    else:
-        risk_level = "HIGH"
+    total = len(df)
+    phishing = int((statuses == "PHISHING").sum())
+    benign = int((statuses == "BENIGN").sum())
+
+    risk = (
+        "LOW"
+        if phishing == 0
+        else "MEDIUM"
+        if phishing <= 3
+        else "HIGH"
+    )
+
+    return total, phishing, benign, risk
+
+
+def show_browser_results():
+    df = load_browser_results()
+
+    if df is None:
+        st.warning(
+            "Browser results CSV not found. "
+            "Click Run Browser Analysis first."
+        )
+        return 0, 0, 0, "UNKNOWN"
+
+    if "Status" not in df.columns:
+        st.error(
+            "The results CSV does not contain a 'Status' column."
+        )
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+        )
+
+        return len(df), 0, 0, "UNKNOWN"
+
+    total, phishing, benign, risk = browser_metrics(df)
 
     c1, c2, c3, c4 = st.columns(4)
+
     c1.metric("Total URLs", total)
     c2.metric("🔴 Phishing URLs", phishing)
     c3.metric("🟢 Benign URLs", benign)
-    c4.metric("⚠️ Risk Level", risk_level)
+    c4.metric("⚠️ Risk Level", risk)
 
-    choice = st.selectbox("Filter results", ["All", "PHISHING", "BENIGN"])
-    if choice != "All":
-        df = df[status_values == choice]
+    choice = st.selectbox(
+        "Filter results",
+        ["All", "PHISHING", "BENIGN"],
+        key="browser_filter",
+    )
 
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    statuses = (
+        df["Status"]
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
 
-    csv_data = df.to_csv(index=False).encode("utf-8")
+    shown = (
+        df
+        if choice == "All"
+        else df[statuses == choice]
+    )
+
+    st.dataframe(
+        shown,
+        use_container_width=True,
+        hide_index=True,
+    )
+
     st.download_button(
         "Download browser results CSV",
-        data=csv_data,
+        data=shown.to_csv(index=False).encode("utf-8"),
         file_name="browser_forensics_results.csv",
         mime="text/csv",
     )
 
-    return total, phishing, benign, risk_level
+    return total, phishing, benign, risk
 
 
 # ==========================================================
@@ -427,17 +598,24 @@ def show_browser_results():
 
 def run_email_analysis():
     if not EMAIL_FILE.exists():
-        st.error("The selected email file was not saved.")
+        st.error(
+            "The selected email file was not saved. "
+            "Select an email and click Analyze Selected Email first."
+        )
         return
 
-    if not (EMAIL_DIR / "main.py").exists():
-        st.error(f"Email forensic main.py not found in {EMAIL_DIR}")
+    main_script = EMAIL_DIR / "main.py"
+
+    if not main_script.exists():
+        st.error(
+            f"Email forensic main.py not found in {EMAIL_DIR}"
+        )
         return
 
     try:
         with st.spinner("Running email forensics..."):
             result = subprocess.run(
-                [sys.executable, str(EMAIL_DIR / "main.py")],
+                [sys.executable, str(main_script)],
                 cwd=str(EMAIL_DIR),
                 capture_output=True,
                 text=True,
@@ -446,32 +624,56 @@ def run_email_analysis():
 
         if result.returncode != 0:
             st.error("Email forensics failed.")
-            st.code(result.stderr or result.stdout)
+
+            st.code(
+                (
+                    result.stderr
+                    or result.stdout
+                    or "No error output was produced."
+                )[-12000:]
+            )
+
             return
 
         st.success("Email forensic analysis completed.")
 
         if EMAIL_REPORT.exists():
-            report = EMAIL_REPORT.read_text(encoding="utf-8", errors="replace")
+            report = EMAIL_REPORT.read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+
             st.session_state.email_report_text = report
+
             st.text_area(
                 "Forensic report preview",
                 report[:10000],
                 height=400,
+                key="email_report_preview",
             )
+
             if len(report) > 10000:
-                st.info("The complete report will be used for the PDF.")
+                st.info(
+                    "The complete report will be used for the PDF."
+                )
+
         else:
             st.warning(
-                f"Analysis finished, but report not found at {EMAIL_REPORT}"
+                f"Analysis finished, but report not found at "
+                f"{EMAIL_REPORT}"
             )
 
         if result.stdout:
-            with st.expander("Email forensic console output"):
+            with st.expander(
+                "Email forensic console output"
+            ):
                 st.text(result.stdout)
 
     except subprocess.TimeoutExpired:
-        st.error("Email analysis took too long and was stopped.")
+        st.error(
+            "Email analysis took too long and was stopped."
+        )
+
     except Exception as error:
         st.error(f"Email analysis failed: {error}")
 
@@ -480,31 +682,47 @@ def run_email_analysis():
 # PDF REPORT
 # ==========================================================
 
-def generate_pdf(total, phishing, benign, risk_level, email_report):
+def generate_pdf(
+    total,
+    phishing,
+    benign,
+    risk_level,
+    email_report,
+):
     if not PDF_MODULE.exists():
-        raise FileNotFoundError(f"PDF generator not found: {PDF_MODULE}")
-
-    import importlib.util
+        raise FileNotFoundError(
+            f"PDF generator not found: {PDF_MODULE}"
+        )
 
     spec = importlib.util.spec_from_file_location(
         "pdf_generator",
         str(PDF_MODULE),
     )
+
     if spec is None or spec.loader is None:
-        raise ImportError("Could not load the PDF generator module.")
+        raise ImportError(
+            "Could not load the PDF generator module."
+        )
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    create_pdf_report = getattr(module, "create_pdf_report", None)
+    create_pdf_report = getattr(
+        module,
+        "create_pdf_report",
+        None,
+    )
+
     if create_pdf_report is None:
         raise AttributeError(
             "pdf_generator.py does not define create_pdf_report()."
         )
 
-    PDF_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PDF_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    # Pass only arguments supported by the actual function signature.
     available_values = {
         "output_path": str(PDF_PATH),
         "pdf_path": str(PDF_PATH),
@@ -517,14 +735,12 @@ def generate_pdf(total, phishing, benign, risk_level, email_report):
     }
 
     signature = inspect.signature(create_pdf_report)
-    parameters = signature.parameters
 
     kwargs = {
         name: available_values[name]
-        for name, parameter in parameters.items()
+        for name, parameter in signature.parameters.items()
         if name in available_values
-        and parameter.kind
-        not in (
+        and parameter.kind not in (
             inspect.Parameter.POSITIONAL_ONLY,
             inspect.Parameter.VAR_POSITIONAL,
         )
@@ -535,30 +751,49 @@ def generate_pdf(total, phishing, benign, risk_level, email_report):
     if not PDF_PATH.exists():
         raise FileNotFoundError(
             "The PDF generator ran, but the PDF was not created at "
-            f"{PDF_PATH}. Check the output path expected by pdf_generator.py."
+            f"{PDF_PATH}. The generator may expect a different "
+            "output path."
         )
 
 
 # ==========================================================
-# MAIN UI
+# MAIN USER INTERFACE
 # ==========================================================
 
-st.title("🔍 AI-Based Browser & Email Forensics Engine")
+st.title(
+    "🔍 AI-Based Browser & Email Forensics Engine"
+)
 
-browser_tab, email_tab = st.tabs(["🌐 Browser Forensics", "📧 Email Forensics"])
+browser_tab, email_tab = st.tabs(
+    ["🌐 Browser Forensics", "📧 Email Forensics"]
+)
+
+# ==========================================================
+# BROWSER TAB
+# ==========================================================
 
 with browser_tab:
     st.subheader("Browser Forensics")
-    if st.button("🔍 Run Browser Analysis"):
+
+    if st.button(
+        "🔍 Run Browser Analysis",
+        key="run_browser_analysis",
+    ):
         run_browser_analysis()
 
-    total, phishing, benign, risk_level = show_browser_results()
+    show_browser_results()
+
+
+# ==========================================================
+# EMAIL TAB
+# ==========================================================
 
 with email_tab:
     st.subheader("Gmail Email Forensics")
+
     st.write(
-        "Connect Gmail, search by sender and date range, select an email, "
-        "and run forensic analysis."
+        "Connect Gmail, search by sender and date range, "
+        "select an email, and run forensic analysis."
     )
 
     service = gmail_login_ui()
@@ -568,42 +803,60 @@ with email_tab:
         placeholder="example@gmail.com",
     )
 
-    c1, c2 = st.columns(2)
-    with c1:
+    col1, col2 = st.columns(2)
+
+    with col1:
         start_date = st.date_input(
             "Start date",
-            value=datetime.now().date() - timedelta(days=30),
+            value=datetime.now().date()
+            - timedelta(days=30),
         )
-    with c2:
+
+    with col2:
         end_date = st.date_input(
             "End date",
             value=datetime.now().date(),
         )
 
-    if st.button("🔎 Search Gmail"):
+    if st.button(
+        "🔎 Search Gmail",
+        key="search_gmail",
+    ):
         if not service:
             st.error("Connect Gmail first.")
+
         elif not sender.strip():
             st.error("Enter a sender email address.")
+
         elif start_date > end_date:
-            st.error("Start date cannot be after end date.")
+            st.error(
+                "Start date cannot be after end date."
+            )
+
         else:
             try:
                 with st.spinner("Searching Gmail..."):
-                    st.session_state.gmail_messages = search_gmail(
-                        service,
-                        sender.strip(),
-                        start_date,
-                        end_date,
+                    st.session_state.gmail_messages = (
+                        search_gmail(
+                            service,
+                            sender.strip(),
+                            start_date,
+                            end_date,
+                        )
                     )
+
                 if st.session_state.gmail_messages:
                     st.success(
-                        f"{len(st.session_state.gmail_messages)} matching email(s) found."
+                        f"{len(st.session_state.gmail_messages)} "
+                        "matching email(s) found."
                     )
+
                 else:
                     st.warning("No matching emails found.")
+
             except HttpError as error:
                 st.error(f"Gmail API error: {error}")
+
             except Exception as error:
                 st.error(f"Gmail search failed: {error}")
 
@@ -616,66 +869,114 @@ with email_tab:
         with st.spinner("Loading email details..."):
             for message in messages:
                 try:
-                    details = get_email_details(service, message["id"])
+                    details = get_email_details(
+                        service,
+                        message["id"],
+                    )
+
                     label = (
                         f"{details['Date']} | "
                         f"{details['Subject'] or '(No Subject)'} | "
                         f"{details['From']}"
                     )
+
                     options.append(label)
-                    details_map[label] = (message["id"], details)
+                    details_map[label] = (
+                        message["id"],
+                        details,
+                    )
+
                 except Exception:
                     continue
 
         if options:
-            selected_label = st.selectbox("Select an email", options)
-            selected_id, details = details_map[selected_label]
+            selected_label = st.selectbox(
+                "Select an email",
+                options,
+                key="selected_email",
+            )
+
+            selected_id, details = details_map[
+                selected_label
+            ]
 
             st.markdown("#### Selected email")
+
             st.write(f"**From:** {details['From']}")
             st.write(f"**To:** {details['To']}")
-            st.write(f"**Subject:** {details['Subject'] or '(No Subject)'}")
+
+            st.write(
+                f"**Subject:** "
+                f"{details['Subject'] or '(No Subject)'}"
+            )
+
             st.write(f"**Date:** {details['Date']}")
 
-            if st.button("🔍 Analyze Selected Email"):
+            if details.get("Snippet"):
+                st.write(
+                    f"**Preview:** {details['Snippet']}"
+                )
+
+            if st.button(
+                "🔍 Analyze Selected Email",
+                key="analyze_selected_email",
+            ):
                 try:
-                    with st.spinner("Saving selected email..."):
-                        save_selected_email(service, selected_id)
+                    with st.spinner(
+                        "Saving selected email..."
+                    ):
+                        save_selected_email(
+                            service,
+                            selected_id,
+                        )
+
                     st.success("Selected email saved.")
+
                     run_email_analysis()
+
                 except HttpError as error:
-                    st.error(f"Could not download email: {error}")
+                    st.error(
+                        f"Could not download email: {error}"
+                    )
+
                 except Exception as error:
-                    st.error(f"Email analysis failed: {error}")
+                    st.error(
+                        f"Email analysis failed: {error}"
+                    )
+
+        else:
+            st.warning(
+                "Could not load details for the returned "
+                "messages. Try searching again."
+            )
 
     elif messages and not service:
-        st.warning("Reconnect Gmail to view and analyze your search results.")
+        st.warning(
+            "Reconnect Gmail to view and analyze your search results."
+        )
+
 
 # ==========================================================
 # PDF DOWNLOAD
 # ==========================================================
 
 st.divider()
+
 st.subheader("📄 Generate Forensic Report")
 
-if st.button("📄 Generate PDF Report"):
+if st.button(
+    "📄 Generate PDF Report",
+    key="generate_pdf_report",
+):
     try:
-        # Re-read the browser metrics for the PDF.
-        csv_path = find_browser_csv()
-        pdf_total, pdf_phishing, pdf_benign, pdf_risk = 0, 0, 0, "UNKNOWN"
+        df = load_browser_results()
 
-        if csv_path:
-            browser_df = pd.read_csv(csv_path)
-            pdf_total = len(browser_df)
-            if "Status" in browser_df.columns:
-                statuses = browser_df["Status"].astype(str).str.upper()
-                pdf_phishing = int((statuses == "PHISHING").sum())
-                pdf_benign = int((statuses == "BENIGN").sum())
-                pdf_risk = (
-                    "LOW" if pdf_phishing == 0
-                    else "MEDIUM" if pdf_phishing <= 3
-                    else "HIGH"
-                )
+        (
+            pdf_total,
+            pdf_phishing,
+            pdf_benign,
+            pdf_risk,
+        ) = browser_metrics(df)
 
         generate_pdf(
             pdf_total,
@@ -686,6 +987,7 @@ if st.button("📄 Generate PDF Report"):
         )
 
         st.success("PDF report generated successfully.")
+
         st.download_button(
             "⬇️ Download PDF Report",
             data=PDF_PATH.read_bytes(),
@@ -694,6 +996,11 @@ if st.button("📄 Generate PDF Report"):
         )
 
     except Exception as error:
-        st.error(f"PDF generation failed: {error}")
+        st.error(
+            f"PDF generation failed: {error}"
+        )
 
-st.caption("AI-Based Browser & Email Forensics Engine")
+
+st.caption(
+    "AI-Based Browser & Email Forensics Engine"
+)
