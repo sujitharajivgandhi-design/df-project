@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "AI Browser Forensics",
+  "version": "1.0.0",
+  "description": "Collect browser history for authorized forensic analysis.",
+  "permissions": [
+    "history"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8000/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "AI Browser Forensics"
+  }
+}

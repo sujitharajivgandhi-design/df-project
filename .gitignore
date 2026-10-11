@@ -1,13 +1,17 @@
+# =========================
 # Python
+# =========================
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
 .venv/
 venv/
 env/
 
+# =========================
 # Browser forensic generated data
+# =========================
 browser/history.csv
 browser/bookmarks.csv
 browser/downloads.csv
@@ -17,34 +21,74 @@ bookmarks.csv
 downloads.csv
 suspicious_urls_v3.csv
 
-# Temporary SQLite/browser files
+# =========================
+# Temporary and database files
+# =========================
 temp_*
 *.sqlite
 *.sqlite3
+*.db
 
+# =========================
 # Machine-learning model files
+# =========================
 *.joblib
 *.pkl
 *.pickle
 
-# Authentication / credentials
+# =========================
+# Authentication and credentials
+# =========================
 credentials.json
 token.json
-
-# Streamlit
-.streamlit/secrets.toml
-
-# Environment files
 .env
 .env.*
+!.env.example
+*.pem
+*.key
 
-# Dataset
+# =========================
+# Streamlit secrets
+# =========================
+.streamlit/secrets.toml
+
+# =========================
+# Datasets and private evidence
+# =========================
 dataset/
+datasets/
+evidence/
+private_data/
 
+# =========================
+# Logs and generated reports
+# =========================
+*.log
+reports/
+investigation_reports/
+
+# =========================
+# Testing and coverage
+# =========================
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# =========================
+# Build output
+# =========================
+dist/
+build/
+
+# =========================
 # IDE
+# =========================
 .vscode/
 .idea/
 
-# OS
+# =========================
+# Operating system
+# =========================
 Thumbs.db
 .DS_Store
