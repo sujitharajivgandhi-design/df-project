@@ -55,7 +55,7 @@ document.getElementById("collect").addEventListener("click", async () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": "Bearer test-secret-change-this"
+          "Authorization": "Bearer browser-test-token-123"
         },
         body: JSON.stringify({
           investigation_id: investigationId,

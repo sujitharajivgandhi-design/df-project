@@ -2,12 +2,17 @@ import base64
 import importlib.util
 import inspect
 import secrets
+"""
+AI Browser Forensics Dashboard
+Browser-only dashboard. The email module files are not changed by this app.
+Browser analysis runs through browser/browser_analysis.py and the existing
+FastAPI Chrome-extension integration remains available below.
+"""
+from datetime import date, timedelta
+import os
 import subprocess
 import sys
-from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import urlencode
-
 import pandas as pd
 import streamlit as st
 import google.auth.transport.requests
@@ -15,18 +20,13 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-
-
-# ==========================================================
-# APP CONFIGURATION
-# ==========================================================
-
+# Streamlit page configuration must be called exactly once and before UI output.
 st.set_page_config(
-    page_title="AI Browser & Email Forensics",
-    page_icon="🔍",
+    page_title="AI Browser Forensics",
+    page_icon="🌐",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
-
 ROOT_DIR = Path(__file__).resolve().parent
 EMAIL_DIR = ROOT_DIR / "email_forensics_project"
 
@@ -64,12 +64,34 @@ DEFAULTS = {
     "oauth_code_verifier": None,
     "oauth_error": None,
 }
-
 for key, value in DEFAULTS.items():
+APP_DIR = str(ROOT_DIR)
+BROWSER_DIR = str(ROOT_DIR / "browser")
+BROWSER_ANALYSIS_FILE = str(ROOT_DIR / "browser" / "browser_analysis.py")
+HISTORY_FILE = str(ROOT_DIR / "browser" / "history.csv")
+RESULT_FILE_BROWSER = str(ROOT_DIR / "browser" / "suspicious_urls_v3.csv")
+RESULT_FILE_ROOT = str(ROOT_DIR / "suspicious_urls_v3.csv")
+
+# Local default matches backend/main.py for local development.
+# In Streamlit Cloud, set EXTENSION_API_TOKEN in App settings / Secrets.
+EXTENSION_API_URL = os.getenv(
+    "EXTENSION_API_URL", "http://127.0.0.1:8000"
+).rstrip("/")
+EXTENSION_API_TOKEN = os.getenv(
+    "EXTENSION_API_TOKEN", "browser-test-token-123"
+)
+
+for key, value in {
+    "analysis_complete": False,
+    "browser_results": None,
+    "analysis_start_date": None,
+    "analysis_end_date": None,
+    "extension_investigation": None,
+    "extension_fetch_error": None,
+    "extension_auto_fetch_done": False,
+}.items():
     if key not in st.session_state:
         st.session_state[key] = value
-
-
 # ==========================================================
 # GOOGLE OAUTH CONFIGURATION
 # ==========================================================
@@ -234,7 +256,6 @@ def handle_oauth_callback():
 
         if flow is None:
             return
-
         callback_url = redirect_uri + "?" + urlencode({
             "code": code,
             "state": returned_state,
@@ -725,7 +746,6 @@ with email_tab:
             "Start date",
             value=datetime.now().date() - timedelta(days=30),
         )
-
     with col2:
         end_date = st.date_input(
             "End date",
@@ -870,4 +890,72 @@ if st.button("📄 Generate PDF Report", key="generate_pdf_report"):
 st.caption("AI-Based Browser & Email Forensics Engine")
 
 
+# Google authentication gate.
+# This restores the existing Streamlit authentication flow (st.user / st.login)
+# without changing browser analysis, AI logic, or backend integration.
+try:
+    logged_in = bool(st.user.is_logged_in)
+except Exception:
+    logged_in = False
+
+if not logged_in:
+    st.title("🌐 AI Browser Forensics")
+    st.markdown(
+        "### Sign in required\\n"
+        "Sign in with your configured Google account to open the browser "
+        "forensics dashboard."
+    )
+    st.button(
+        "🔵 Sign in with Google",
+        on_click=st.login,
+        use_container_width=True,
+        type="primary",
+    )
+    st.info("Complete Google sign-in to continue.")
+    st.stop()
+
+with st.sidebar:
+    st.success("Google account authenticated")
+    user_name = getattr(st.user, "name", "") or "Google User"
+    user_email = getattr(st.user, "email", "")
+    st.markdown(f"### 👤 {user_name}")
+    if user_email:
+        st.caption(user_email)
+    st.divider()
+    st.button("🚪 Sign out", on_click=st.logout, use_container_width=True)
+    st.caption("Browser history + phishing URL analysis")
+
+
+# Lightweight visual polish, without changing analysis logic.
+st.markdown(
+    """
+    <style>
+      .block-container {padding-top: 1.6rem; padding-bottom: 2.5rem;}
+      div[data-testid="stMetric"] {
+        border: 1px solid rgba(128,128,128,.22);
+        border-radius: 12px;
+        padding: 14px 16px;
+        background: rgba(128,128,128,.045);
+      }
+      .hero {
+        padding: 1.25rem 1.4rem;
+        border-radius: 16px;
+        border: 1px solid rgba(128,128,128,.24);
+        margin-bottom: 1rem;
+      }
+      .muted {opacity: .75;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <div class="hero">
+      <h1>🌐 AI Browser Forensics</h1>
+      <p class="muted">Browser history investigation · URL risk analysis · Chrome extension results</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 

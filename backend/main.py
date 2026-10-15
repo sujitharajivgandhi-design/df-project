@@ -1,22 +1,22 @@
-
 import os
 import secrets
-import sys
 from datetime import datetime, timezone
-from typing import Any
-
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from backend.database import (
+    initialize_database,
+    save_investigation,
+    get_investigation,
+    get_latest_investigation,
+)
 
-if PROJECT_DIR not in sys.path:
-    sys.path.insert(0, PROJECT_DIR)
+app = FastAPI(
+    title="AI Forensics Browser History API",
+    version="0.4.0",
+)
 
-app = FastAPI(title="AI Forensics Browser History API", version="0.3.0")
-
-API_TOKEN = os.getenv("EXTENSION_API_TOKEN", "")
-INVESTIGATIONS: dict[str, dict[str, Any]] = {}
+API_TOKEN = os.getenv("EXTENSION_API_TOKEN") or "browser-test-token-123"
 
 
 class HistoryRecord(BaseModel):
@@ -34,6 +34,9 @@ class HistorySubmission(BaseModel):
 
 
 def require_token(authorization: str | None) -> None:
+    print("DEBUG: Authorization header received:", repr(authorization))
+    print("DEBUG: API token configured:", bool(API_TOKEN))
+
     if not API_TOKEN:
         raise HTTPException(
             status_code=503,
@@ -41,16 +44,33 @@ def require_token(authorization: str | None) -> None:
         )
 
     expected = f"Bearer {API_TOKEN}"
-    if not authorization or not secrets.compare_digest(authorization, expected):
+
+    if not authorization or not secrets.compare_digest(
+        authorization, expected
+    ):
         raise HTTPException(
             status_code=401,
             detail="Invalid or missing bearer token.",
         )
 
 
+
+@app.on_event("startup")
+def startup():
+    try:
+        initialize_database()
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not initialize SQLite database."
+        ) from exc
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "browser-history-api"}
+    return {
+        "status": "ok",
+        "service": "browser-history-api",
+    }
 
 
 @app.post("/api/history")
@@ -76,8 +96,10 @@ def receive_history(
         )
 
     records = []
+
     for record in payload.records:
         url = record.url.strip()
+
         if url.lower().startswith(("http://", "https://")):
             records.append({
                 "url": url,
@@ -96,72 +118,133 @@ def receive_history(
         "status": "received_not_analyzed",
     }
 
-    # Store the submission before analysis so it remains available
-    # if model loading or prediction fails.
-    INVESTIGATIONS[payload.investigation_id] = investigation
-
+    # Analyze the browser history.
     try:
         from models.history_analyzer import analyze_history
 
         results = analyze_history(records)
+
         investigation["analysis"] = results
         investigation["analyzed_url_count"] = len(results)
         investigation["phishing_count"] = sum(
-            1 for item in results if item.get("status") == "PHISHING"
+            1 for item in results
+            if item.get("status") == "PHISHING"
         )
         investigation["benign_count"] = sum(
-            1 for item in results if item.get("status") == "BENIGN"
+            1 for item in results
+            if item.get("status") == "BENIGN"
         )
         investigation["status"] = "analyzed"
 
     except Exception as exc:
         investigation["status"] = "analysis_failed"
-        investigation["analysis_error"] = str(exc)
+        investigation["analysis_error"] = str(exc)[:500]
+
+    # Persist the investigation in SQLite.
+    try:
+        save_investigation(investigation)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not save investigation to SQLite.",
+        ) from exc
 
     return {
         "ok": True,
         "investigation_id": payload.investigation_id,
         "received_records": len(records),
         "status": investigation["status"],
-        "analyzed_url_count": investigation.get("analyzed_url_count", 0),
+        "analyzed_url_count": investigation.get(
+            "analyzed_url_count", 0
+        ),
         "phishing_count": investigation.get("phishing_count", 0),
         "benign_count": investigation.get("benign_count", 0),
         "analysis_error": investigation.get("analysis_error"),
     }
 
 
-# Define /latest BEFORE /{investigation_id}.
+# Keep /latest before /{investigation_id}.
 @app.get("/api/history/latest")
-def get_latest_history(
+def latest_history(
     authorization: str | None = Header(default=None),
 ):
     require_token(authorization)
 
-    if not INVESTIGATIONS:
+    try:
+        result = get_latest_investigation()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not retrieve investigation from SQLite.",
+        ) from exc
+
+    if result is None:
         raise HTTPException(
             status_code=404,
             detail="No investigations submitted yet.",
         )
 
-    latest = max(
-        INVESTIGATIONS.values(),
-        key=lambda item: item.get("received_at", ""),
-    )
-    return latest
+    return result
 
 
 @app.get("/api/history/{investigation_id}")
-def get_history(
+def history_by_id(
     investigation_id: str,
     authorization: str | None = Header(default=None),
 ):
     require_token(authorization)
 
-    result = INVESTIGATIONS.get(investigation_id)
+    try:
+        result = get_investigation(investigation_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not retrieve investigation from SQLite.",
+        ) from exc
+
     if result is None:
         raise HTTPException(
             status_code=404,
-            detail="Investigation not found. Submit the history again.",
+            detail="Investigation not found.",
         )
 
     return result
+
+@app.post("/api/history/analyze-v3")
+def analyze_history_with_v3(
+    payload: HistorySubmission,
+    authorization: str | None = Header(default=None),
+):
+    require_token(authorization)
+
+    try:
+        from models.history_analyzer_v3 import analyze_history_v3
+
+        records = [
+            {
+                "url": record.url.strip(),
+                "title": record.title,
+                "lastVisitTime": record.lastVisitTime,
+                "visitCount": record.visitCount,
+            }
+            for record in payload.records
+            if record.url.strip().lower().startswith(
+                ("http://", "https://")
+            )
+        ]
+
+        results = analyze_history_v3(records)
+
+        return {
+            "ok": True,
+            "model_version": "v3",
+            "label_mapping_verified": False,
+            "analyzed_url_count": len(results),
+            "results": results,
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"V3 analysis failed: {str(exc)[:300]}",
+        ) from exc
