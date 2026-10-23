@@ -148,11 +148,9 @@ def receive_history(
         investigation["status"] = "analysis_failed"
         investigation["analysis_error"] = str(exc)[:500]
     # Persist the investigation in PostgreSQL.
+  
     try:
-        print(
-            "DEBUG: Saving investigation:",
-            investigation["investigation_id"],
-        )
+        print("DEBUG: Saving investigation:", investigation["investigation_id"])
         save_investigation(investigation)
         print("DEBUG: Investigation saved successfully")
     except Exception as exc:
@@ -161,7 +159,6 @@ def receive_history(
             status_code=503,
             detail="Could not save investigation to PostgreSQL.",
         ) from exc
-
     return {
         "ok": True,
         "investigation_id": payload.investigation_id,
