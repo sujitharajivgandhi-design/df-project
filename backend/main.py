@@ -1,5 +1,6 @@
 import os
 import secrets
+from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timezone
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -14,6 +15,13 @@ from backend.database import (
 app = FastAPI(
     title="AI Forensics Browser History API",
     version="0.4.0",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 API_TOKEN = os.getenv("EXTENSION_API_TOKEN") or "browser-test-token-123"
