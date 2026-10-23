@@ -147,14 +147,19 @@ def receive_history(
     except Exception as exc:
         investigation["status"] = "analysis_failed"
         investigation["analysis_error"] = str(exc)[:500]
-
-    # Persist the investigation in SQLite.
+    # Persist the investigation in PostgreSQL.
     try:
+        print(
+            "DEBUG: Saving investigation:",
+            investigation["investigation_id"],
+        )
         save_investigation(investigation)
+        print("DEBUG: Investigation saved successfully")
     except Exception as exc:
+        print("DEBUG: Database save failed:", repr(exc))
         raise HTTPException(
             status_code=503,
-            detail="Could not save investigation to SQLite.",
+            detail="Could not save investigation to PostgreSQL.",
         ) from exc
 
     return {
@@ -169,7 +174,6 @@ def receive_history(
         "benign_count": investigation.get("benign_count", 0),
         "analysis_error": investigation.get("analysis_error"),
     }
-
 
 # Keep /latest before /{investigation_id}.
 @app.get("/api/history/latest")
