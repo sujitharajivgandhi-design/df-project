@@ -53,6 +53,7 @@ def analyze_history(records):
     scaler = joblib.load(SCALER_PATH)
 
     classes = list(model.classes_)
+    print("Model classes:", classes, flush=True)
     phishing_class = next(
         (
             c for c in classes
