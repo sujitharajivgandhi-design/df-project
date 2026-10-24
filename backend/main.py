@@ -71,7 +71,6 @@ def startup():
     try:
         initialize_database()
     except Exception as exc:
-        # Avoid exposing database credentials or internal details.
         raise RuntimeError(
             "Could not initialize the PostgreSQL database. "
             "Check DATABASE_URL and database connectivity."
@@ -96,11 +95,11 @@ def receive_history(
     try:
         start = datetime.fromisoformat(payload.start_date).date()
         end = datetime.fromisoformat(payload.end_date).date()
-    except ValueError:
+    except ValueError as exc:
         raise HTTPException(
             status_code=400,
             detail="Dates must use YYYY-MM-DD format.",
-        )
+        ) from exc
 
     if start > end:
         raise HTTPException(
@@ -131,7 +130,7 @@ def receive_history(
         "status": "received_not_analyzed",
     }
 
-    # Analyze the browser history.
+    # Analyze browser history and log the actual failure.
     try:
         from models.history_analyzer import analyze_history
 
@@ -149,8 +148,13 @@ def receive_history(
         )
         investigation["status"] = "analyzed"
 
-    except Exception:
-        # Keep the submission even if analysis fails.
+    except Exception as exc:
+        print(
+            "History analysis failed:",
+            type(exc).__name__,
+            str(exc)[:300],
+            flush=True,
+        )
         investigation["status"] = "analysis_failed"
         investigation["analysis_error"] = (
             "History analysis failed. Check backend logs."
@@ -160,6 +164,12 @@ def receive_history(
     try:
         save_investigation(investigation)
     except Exception as exc:
+        print(
+            "Saving investigation failed:",
+            type(exc).__name__,
+            str(exc)[:300],
+            flush=True,
+        )
         raise HTTPException(
             status_code=503,
             detail="Could not save investigation to PostgreSQL. "
@@ -190,6 +200,12 @@ def latest_history(
     try:
         result = get_latest_investigation()
     except Exception as exc:
+        print(
+            "Latest investigation retrieval failed:",
+            type(exc).__name__,
+            str(exc)[:300],
+            flush=True,
+        )
         raise HTTPException(
             status_code=503,
             detail="Could not retrieve investigation from PostgreSQL.",
@@ -214,6 +230,12 @@ def history_by_id(
     try:
         result = get_investigation(investigation_id)
     except Exception as exc:
+        print(
+            "Investigation retrieval failed:",
+            type(exc).__name__,
+            str(exc)[:300],
+            flush=True,
+        )
         raise HTTPException(
             status_code=503,
             detail="Could not retrieve investigation from PostgreSQL.",
@@ -261,7 +283,6 @@ def analyze_history_with_v3(
             "results": results,
         }
 
-   
     except Exception as exc:
         print(
             "V3 history analysis failed:",
