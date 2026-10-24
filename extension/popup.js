@@ -36,9 +36,9 @@ document.getElementById("collect").addEventListener("click", async () => {
       .map(item => ({
         url: item.url,
         title: item.title || "",
-       lastVisitTime: item.lastVisitTime != null
-  ? Math.trunc(item.lastVisitTime)
-  : null,
+        lastVisitTime: item.lastVisitTime != null
+          ? Math.trunc(item.lastVisitTime)
+          : null,
         visitCount: item.visitCount || 0
       }));
 
@@ -50,12 +50,12 @@ document.getElementById("collect").addEventListener("click", async () => {
         : "investigation-" + Date.now();
 
     const response = await fetch(
-      "http://127.0.0.1:8000/api/history",
+      "https://df-project.onrender.com/api/history",
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": "Bearer browser-test-token-123"
+          "Authorization": "Bearer BrowserForensics_7Kp9M2vQ4xL8"
         },
         body: JSON.stringify({
           investigation_id: investigationId,
@@ -70,7 +70,6 @@ document.getElementById("collect").addEventListener("click", async () => {
 
     if (!response.ok) {
       const detail = result.detail;
-
       throw new Error(
         typeof detail === "string"
           ? detail

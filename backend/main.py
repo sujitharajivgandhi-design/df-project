@@ -1,8 +1,10 @@
+
 import os
 import secrets
-from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timezone
+
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from backend.database import (
@@ -14,8 +16,9 @@ from backend.database import (
 
 app = FastAPI(
     title="AI Forensics Browser History API",
-    version="0.4.0",
+    version="0.4.1",
 )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -42,25 +45,25 @@ class HistorySubmission(BaseModel):
 
 
 def require_token(authorization: str | None) -> None:
-    print("DEBUG: Authorization header received:", repr(authorization))
-    print("DEBUG: API token configured:", bool(API_TOKEN))
-
     if not API_TOKEN:
         raise HTTPException(
             status_code=503,
-            detail="Set EXTENSION_API_TOKEN in the backend environment.",
+            detail="EXTENSION_API_TOKEN is not configured.",
+        )
+
+    if not authorization:
+        raise HTTPException(
+            status_code=401,
+            detail="Authorization header is missing.",
         )
 
     expected = f"Bearer {API_TOKEN}"
 
-    if not authorization or not secrets.compare_digest(
-        authorization, expected
-    ):
+    if not secrets.compare_digest(authorization.strip(), expected):
         raise HTTPException(
             status_code=401,
-            detail="Invalid or missing bearer token.",
+            detail="Authorization header does not match the configured token.",
         )
-
 
 
 @app.on_event("startup")
@@ -68,8 +71,10 @@ def startup():
     try:
         initialize_database()
     except Exception as exc:
+        # Avoid exposing database credentials or internal details.
         raise RuntimeError(
-            "Could not initialize SQLite database."
+            "Could not initialize the PostgreSQL database. "
+            "Check DATABASE_URL and database connectivity."
         ) from exc
 
 
@@ -144,21 +149,23 @@ def receive_history(
         )
         investigation["status"] = "analyzed"
 
-    except Exception as exc:
+    except Exception:
+        # Keep the submission even if analysis fails.
         investigation["status"] = "analysis_failed"
-        investigation["analysis_error"] = str(exc)[:500]
-    # Persist the investigation in PostgreSQL.
-  
+        investigation["analysis_error"] = (
+            "History analysis failed. Check backend logs."
+        )
+
+    # Save the investigation to PostgreSQL.
     try:
-        print("DEBUG: Saving investigation:", investigation["investigation_id"])
         save_investigation(investigation)
-        print("DEBUG: Investigation saved successfully")
     except Exception as exc:
-        print("DEBUG: Database save failed:", repr(exc))
         raise HTTPException(
             status_code=503,
-            detail="Could not save investigation to PostgreSQL.",
+            detail="Could not save investigation to PostgreSQL. "
+                   "Check DATABASE_URL and database logs.",
         ) from exc
+
     return {
         "ok": True,
         "investigation_id": payload.investigation_id,
@@ -172,6 +179,7 @@ def receive_history(
         "analysis_error": investigation.get("analysis_error"),
     }
 
+
 # Keep /latest before /{investigation_id}.
 @app.get("/api/history/latest")
 def latest_history(
@@ -184,7 +192,7 @@ def latest_history(
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail="Could not retrieve investigation from SQLite.",
+            detail="Could not retrieve investigation from PostgreSQL.",
         ) from exc
 
     if result is None:
@@ -208,7 +216,7 @@ def history_by_id(
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail="Could not retrieve investigation from SQLite.",
+            detail="Could not retrieve investigation from PostgreSQL.",
         ) from exc
 
     if result is None:
@@ -218,6 +226,7 @@ def history_by_id(
         )
 
     return result
+
 
 @app.post("/api/history/analyze-v3")
 def analyze_history_with_v3(
