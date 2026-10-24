@@ -5,4 +5,4 @@ pydantic
 psycopg[binary]
 joblib
 pandas
-sklearn
+scikit-learn
