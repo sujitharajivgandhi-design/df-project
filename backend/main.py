@@ -261,13 +261,15 @@ def analyze_history_with_v3(
             "results": results,
         }
 
+   
     except Exception as exc:
-       print(
-        "History analysis failed:",
-        type(exc).__name__,
-        str(exc)[:300]
-    )
-    investigation["status"] = "analysis_failed"
-    investigation["analysis_error"] = (
-        "History analysis failed. Check backend logs."
-    )
+        print(
+            "V3 history analysis failed:",
+            type(exc).__name__,
+            str(exc)[:300],
+            flush=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"V3 analysis failed: {str(exc)[:300]}",
+        ) from exc
